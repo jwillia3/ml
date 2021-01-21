@@ -1,5 +1,5 @@
 #define new(t,...) memcpy(malloc(sizeof(t)), &(t){__VA_ARGS__}, sizeof(t))
-#define expr(f,...) new(struct expr, .loc = loc, .form = f, __VA_ARGS__)
+#define expr(F, LOC,...) new(struct expr, .loc = LOC, .form = F, __VA_ARGS__)
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct loc { char *fn; int ln; };
+typedef struct loc { char *fn; int ln, col; } loc;
 
 typedef struct value {
     enum { INT, CHAR, STRING, TUPLE, DATA, FN, PRIM } form;
@@ -18,7 +18,7 @@ typedef struct value {
         char    *string;
         struct  { int n; struct value *tuple; };
         struct  { char *con; struct value *data; };
-        struct  { struct expr *param, *body; struct environ *env; };
+        struct  { char *param; struct expr *body; struct environ *env; };
         struct value (*prim)(struct expr *c, struct value value);
     };
 } value;
@@ -57,7 +57,7 @@ typedef struct typing {
 typedef struct expr expr;
 struct expr {
     enum { EINT, ECHAR, ESTRING, EVAR, ECON, ETUPLE, EFN,
-        EAPP, ECASE, ELET, EREC, ETY
+        EAPP, ECASE, ELET, EREC, ETY, EAS,
     } form;
     union {
         int     integer;
@@ -70,8 +70,9 @@ struct expr {
         struct { struct dec *decs; expr *body; } rec;
         struct { expr *subject; struct rule *rules; };
         struct { expr *value; type *type; } typing;
+        struct { char *id; expr *value; } as, fn;
     };
-    struct loc loc;
+    loc loc;
 };
 struct dec { char *id; expr *fn; struct dec *next; };
 struct rule { expr *lhs, *rhs; struct rule *next; };
@@ -84,24 +85,30 @@ struct op {
     struct op *next;
 };
 
+typedef struct con_use {
+    char *id;
+    struct con_use *next;
+} con_use;
+
 typedef enum {
     // Keep in order with `tokens[]`.
     // Keep relative order: CID, single-char punct, ID, reserved
     TEOF, TINT, TCHAR, TSTRING, TCID, TLP, TRP, TLB, TRB,
     TCOMMA, TSEMI, TID, TEQUAL, TLET, TREC, TAND, TIN, TFN,
     TARROW, TCASE, TBAR, TIF, TTHEN, TELSE, TINFIXL, TINFIXR,
-    TDATATYPE, TTYPING,
+    TDATATYPE, TTYPING, TCONT, TAS,
 } Token;
 
 char *opchr = "!%&$*+-/:<=>?@\\~`^|";
 char *tokens[] = {"eof", "int", "character", "string", "con id",
     "(", ")", "[", "]", ",", ";", "id", "=", "let", "rec",
     "and", "in", "fn", "->", "case", "|", "if", "then", "else",
-    "infixl", "infixr", "datatype", "::", 0 };
+    "infixl", "infixr", "datatype", "::", "---", "@", 0 };
 
 char        source[128 * 1024];
 char        *src;
-struct loc  loc;
+char        *srcsol;
+loc         srcloc;
 Token       token;
 bool        peeked;
 int         tokint;
@@ -109,7 +116,6 @@ char        tokbuf[sizeof source];
 char        *tokstr;
 char        *interns[65536];
 int         ninterns;
-char        *ignore;
 int         coin_types;
 struct op   *optab;
 types       *nongeneric;
@@ -118,6 +124,9 @@ typing      *contab;
 type        *inttype, *chartype, *strtype;
 value       trueval, falseval;
 char        *consid, *nilid, *noneid, *someid, *trueid, *falseid, *andid, *orid;
+char        *refid, *ignore;
+char        *strings[256];
+int         formal_uid;
 
 void *pr(char *msg, ...);
 type *ty(void);
@@ -188,7 +197,7 @@ bool consp(value x) {
     return x.con == consid;
 }
 
-value function(expr *param, expr *body, environ *env) {
+value function(char *param, expr *body, environ *env) {
     return (value) { FN, .param = param, .body = body, .env = env };
 }
 
@@ -345,7 +354,7 @@ void *print_type(type *t) {
                     else if (t->n > 1) {
                         for (int i = 0; i < t->n; i++)
                             pr("%s%t", i? ", ": "(", t->args[i]);
-                        return pr(")");
+                        return pr(") %s", t->id);
                     }
 
     case FNTY:      return pr(isfn(t->args[0])? "(%t) -> %t": "%t -> %t",
@@ -371,7 +380,7 @@ void *print_expression(expr *e) {
                         pr("%s%e", i? ", ": "", e->tuple[i]);
                     return pr(")");
 
-    case EFN:       return pr("fn %e -> %e", e->lhs, e->rhs);
+    case EFN:       return pr("fn %s -> %e", e->fn.id, e->fn.value);
 
     case EAPP:      return pr("(%e %e)", e->lhs, e->rhs);
 
@@ -389,15 +398,28 @@ void *print_expression(expr *e) {
                     return pr(" in %e)", e->rec.body);
 
     case ETY:       return pr("((%e) :: %t)", e->typing.value, e->typing.type);
+    case EAS:       return pr("(%s @ %e)", e->as.id, e->as.value);
+    }
+}
+
+void *print_escape(unsigned c, int quote) {
+    switch (c) {
+    case '\n':      return pr("\\n");
+    case '\t':      return pr("\\t");
+    default:        return pr(c == quote || c == '\\'? "\\%c": "%c", c);
     }
 }
 
 void *print_value(value x) {
     switch (x.form) {
     case INT:       return pr("%d", x.integer);
-    case CHAR:      return pr("%c", x.character);
-    case STRING:    return pr("%s", x.string);
-
+    case CHAR:      pr("'");
+                    print_escape(x.character, '\'');
+                    return pr("'");
+    case STRING:    pr("\"");
+                    for (char *s = x.string; *s; s++)
+                        print_escape(*s, '"');
+                    return pr("\"");
     case TUPLE:     pr("(");
                     for (int i = 0; i < x.n; i++)
                         pr("%s%x", i? ", ": "", x.tuple[i]);
@@ -411,12 +433,15 @@ void *print_value(value x) {
                             pr("%x%s", hd(i), consp(tl(i))? ", ": "");
                         return pr("]");
                     }
+                    else if (x.data && x.data->form == DATA && x.data->data)
+                        return pr("%s(%x)", x.con, *x.data);
                     else if (x.data)
                         return pr("%s %x", x.con, *x.data);
                     else
                         return pr("%s", x.con);
 
-    case FN:        return pr("(#fn %s:%d)", x.param->loc.fn, x.param->loc.ln);
+    case FN:        return pr("(#fn %s:%d:%d)",
+                        x.body->loc.fn, x.body->loc.ln, x.body->loc.col);
 
     case PRIM:      return pr("(#prim)");
     }
@@ -449,15 +474,43 @@ void *pr(char *msg, ...) {
     va_end(ap);
 }
 
+con_use *cons_for(type *type) {
+    if (type->form != TY)
+        return 0;
+    con_use *cons = 0;
+    for (typing *i = contab; i; i = i->next) {
+        struct type *t = i->type;
+        if (t->form == TY && t->id == type->id ||
+            isfn(t) && t->args[1]->form == TY && t->args[1]->id == type->id)
+        {
+            cons = new(con_use, i->id, cons);
+        }
+    }
+    return cons;
+}
+
+void use_con(con_use **cons, char *id) {
+    if (id == ignore)
+        *cons = 0;
+    else {
+        con_use **i = cons;
+        while (*i)
+            if ((*i)->id == id)
+                *i = (*i)->next;
+            else
+                i = &(*i)->next;
+    }
+}
+
 _Noreturn void *syntax(char *msg, ...) {
     va_list ap; va_start(ap, msg);
-    pr("(boot) error %s:%d: %*.\n", loc.fn, loc.ln, msg, &ap);
+    pr("error %s:%d:%d: %*.\n", srcloc.fn, srcloc.ln, srcloc.col, msg, &ap);
     exit(1);
 }
 
 void open_source(char *filename) {
-    loc = (struct loc){ strdup(filename), 1 };
-    src = source, peeked = false;
+    srcloc = (loc) { strdup(filename), 1 };
+    src = srcsol = source, peeked = false;
     FILE *file = fopen(filename, "rb");
     if (!file)
         syntax("cannot open");
@@ -492,12 +545,15 @@ Token next(void) {
         return peeked = false, token;
 
     for ( ; isspace(*src) || *src == '#'; src++)
-        if (*src == '\n')
-            loc.ln++;
+        if (*src == '\n') {
+            srcloc.ln++;
+            srcsol = src + 1;
+        }
         else if (*src == '#')
             while (src[1] && src[1] != '\n')
                 src++;
 
+    srcloc.col = src - srcsol + 1;
     if (!*src)
         return token = TEOF;
 
@@ -576,60 +632,124 @@ struct op *op_if_next(int level) {
     return 0;
 }
 
-expr *conref(char *id) {
-    return expr(ECON, .id = id);
+expr *conref(char *id, loc loc) {
+    return expr(ECON, loc, .id = id);
 }
 
-expr *binapp(bool iscon, char *id, expr *lhs, expr *rhs) {
-    expr *f = expr(iscon? ECON: EVAR, .id = id);
-    expr *x = expr(ETUPLE, .n = 2, .tuple = new(expr*[2], lhs, rhs));
-    return expr(EAPP, .lhs = f, .rhs = x);
+expr *binapp(bool iscon, char *id, expr *lhs, expr *rhs, loc loc) {
+    expr *f = expr(iscon? ECON: EVAR, loc, .id = id);
+    expr *x = expr(ETUPLE, loc, .n = 2, .tuple = new(expr*[2], lhs, rhs));
+    return expr(EAPP, lhs->loc, .lhs = f, .rhs = x);
 }
 
-expr *ifmatch(expr *test, expr *affirm, expr *negative) {
+expr *ifmatch(expr *test, expr *affirm, expr *negative, loc loc) {
     struct rule *rules =
-        new(struct rule, conref(falseid), negative,
-        new(struct rule, conref(trueid), affirm, 0));
-    return expr(ECASE, .subject = test, .rules = rules);
+        new(struct rule, conref(falseid, negative->loc), negative,
+        new(struct rule, conref(trueid, affirm->loc), affirm, 0));
+    return expr(ECASE, loc, .subject = test, .rules = rules);
 }
 
 expr *listexp(void) {
     if (want(TRB))
-        return conref(nilid);
+        return conref(nilid, srcloc);
 
     expr *hd = expression();
 
     if (want(TCOMMA)) {
+        loc loc = (peek(0), srcloc);
         expr *tl = listexp();
-        return binapp(true, consid, hd, tl);
+        return binapp(true, consid, hd, tl, loc);
     } else {
         need(TRB);
-        return binapp(true, consid, hd, conref(nilid));
+        return binapp(true, consid, hd, conref(nilid, srcloc), srcloc);
     }
 }
 
-expr *funexp(Token delim) {
+expr *fnexp(Token delim, Token cont, char *cont_name, loc loc) {
     if (want(delim))
         return expression();
-    expr *lhs = atexp(true);
-    expr *rhs = funexp(delim);
-    return expr(EFN, .lhs = lhs, .rhs = rhs);
+
+    type    *typing = want(TTYPING)? ty_with_coining(): 0;
+
+    struct rule *rules = 0;
+    struct rule **rulep = &rules;
+    int     nformals = 0;
+    int     uid = formal_uid;
+
+    if (typing && peek(cont))
+        goto check_cont;
+
+    while (true) {
+        struct loc loc = (peek(0), srcloc);
+        int     n = 0;
+        expr    **pars = 0;
+        expr    *par;
+
+        while ((par = atexp(false))) {
+            pars = realloc(pars, (n + 1) * sizeof *pars);
+            pars[n++] = par;
+        }
+
+        if (!rules) {
+            nformals = n;
+            formal_uid += n;
+        }
+
+        need(delim);
+        expr *lhs = n == 1? pars[0]: expr(ETUPLE, loc, .n = n, .tuple = pars);
+        expr *rhs = expression();
+
+        if (n != nformals)
+            syntax("arity does not match: %d/%d", n, nformals);
+        *rulep = new(struct rule, lhs, rhs, *rulep);
+        rulep = &(*rulep)->next;
+
+check_cont:
+        if (!want(cont))
+            break;
+        if (cont_name && (need(TID), strcmp(tokstr, cont_name)))
+            syntax("need name after ---: %s", cont_name);
+    }
+
+    formal_uid -= nformals;
+
+    expr **formals = malloc(nformals * sizeof(expr*));
+    for (int i = 0; i < nformals; i++) {
+        char id[8];
+        sprintf(id, "'%d", uid++);
+        formals[i] = expr(EVAR, loc, .id = intern(id));
+    }
+
+    expr *tuple = nformals == 1? formals[0]:
+                  expr(ETUPLE, loc, .n = nformals, .tuple = formals);
+    expr *result = expr(ECASE, loc, .subject = tuple, .rules = rules);
+
+
+    for (int i = nformals; i-- > 0; )
+        result = expr(EFN, loc, .fn = { formals[i]->id, result });
+    return result;
 }
 
 expr *atexp(bool required) {
+    loc loc = (peek(0), srcloc);
 
     // Do not consume operator as argument.
     if (!required && op_if_next(-1))
         return 0;
 
-    if (want(TINT))     return expr(EINT, .integer = tokint);
-    if (want(TCHAR))    return expr(ECHAR, .character = tokint);
-    if (want(TSTRING))  return expr(ESTRING, .string = tokstr);
-    if (want(TID))      return expr(EVAR, .id = tokstr);
-    if (want(TCID))     return expr(ECON, .id = tokstr);
+    if (want(TINT))     return expr(EINT, loc, .integer = tokint);
+    if (want(TCHAR))    return expr(ECHAR, loc, .character = tokint);
+    if (want(TSTRING))  return expr(ESTRING, loc, .string = tokstr);
+    if (want(TCID))     return expr(ECON, loc, .id = tokstr);
     if (want(TLB))      return listexp();
-    if (want(TFN))      return funexp(TARROW);
+    if (want(TFN))      return fnexp(TARROW, TBAR, 0, loc);
 
+    if (want(TID)) {
+        char *id = tokstr;
+        if (want(TAS))
+            return expr(EAS, loc, .as = {id, atexp(true)});
+        return expr(EVAR, loc, .id = id);
+    }
     if (want(TLP)) { // Tuple.
         int     n = 0;
         expr    **tuple = 0;
@@ -641,8 +761,11 @@ expr *atexp(bool required) {
         } while (want(TCOMMA));
         need(TRP);
 
-        return n == 1? tuple[0]:
-               expr(ETUPLE, .n = n, .tuple = tuple);
+        if (n == 1) {
+            tuple[0]->loc = loc;
+            return tuple[0];
+        } else
+            return expr(ETUPLE, loc, .n = n, .tuple = tuple);
     }
 
     return required? syntax("need expression before %s", tokens[token]): 0;
@@ -652,7 +775,7 @@ expr *appexp(void) {
     expr *lhs = atexp(true);
     expr *rhs;
     while ((rhs = atexp(false)))
-        lhs = expr(EAPP, .lhs = lhs, .rhs = rhs);
+        lhs = expr(EAPP, lhs->loc, .lhs = lhs, .rhs = rhs);
     return lhs;
 }
 
@@ -670,9 +793,11 @@ expr *infexp(int level) {
             expr *rhs = infexp(op->rhs);
 
             // Hijack `&&` and `||` and turn into conditionals.
-            lhs = op->id == andid?  ifmatch(lhs, rhs, conref(falseid)):
-                  op->id == orid?   ifmatch(lhs, conref(trueid), rhs):
-                                    binapp(op->iscon, op->id, lhs, rhs);
+            lhs = op->id == andid?
+                    ifmatch(lhs, rhs, conref(falseid, lhs->loc), lhs->loc):
+                  op->id == orid?
+                    ifmatch(lhs, conref(trueid, lhs->loc), rhs, lhs->loc):
+                  binapp(op->iscon, op->id, lhs, rhs, lhs->loc);
         }
         return lhs;
     }
@@ -684,8 +809,9 @@ struct dec *rec_decs(void) {
 
     want(TAND);
     do {
+        loc     loc = (peek(0), srcloc);
         char    *id = (need(TID), tokstr);
-        expr    *body = funexp(TEQUAL);
+        expr    *body = fnexp(TEQUAL, TCONT, id, loc);
 
         *indir = new(struct dec, id, body, 0);
         indir = &(*indir)->next;
@@ -698,10 +824,12 @@ struct dec *rec_decs(void) {
 expr **nonrec_decs(expr **indir) {
     want(TAND);
     do {
+        loc     loc = (peek(0), srcloc);
         expr    *lhs = atexp(true);
-        expr    *rhs = funexp(TEQUAL);
+        char    *id = lhs->form==EVAR? lhs->id: "(bad)";
+        expr    *rhs = fnexp(TEQUAL, TCONT, id, loc);
 
-        *indir = expr(ELET, .let = { lhs, rhs, 0 });
+        *indir = expr(ELET, loc, .let = { lhs, rhs, 0 });
         indir = &(*indir)->let.body;
 
     } while (want(TAND));
@@ -710,12 +838,14 @@ expr **nonrec_decs(expr **indir) {
 }
 
 expr *complex(void) {
+    loc loc = (peek(0), srcloc);
+
     if (want(TLET))
         if (want(TREC)) {
             struct dec *decs = rec_decs();
             need(TIN);
             expr *body = expression();
-            return expr(EREC, .rec = { decs, body });
+            return expr(EREC, loc, .rec = { decs, body });
         }
         else {
             expr *decs = 0;
@@ -739,14 +869,14 @@ expr *complex(void) {
             indir = &(*indir)->next;
         }
 
-        return expr(ECASE, .subject = subject, .rules = rules);
+        return expr(ECASE, loc, .subject = subject, .rules = rules);
     }
 
     if (want(TIF)) {
         expr *test = expression();
         expr *affirm = (need(TTHEN), expression());
         expr *negative = (need(TELSE), expression());
-        return ifmatch(test, affirm, negative);
+        return ifmatch(test, affirm, negative, loc);
     }
 
     return infexp(0);
@@ -757,13 +887,13 @@ expr *expression(void) {
 
     if (want(TSEMI)) {
         expr    *body = expression();
-        expr    *_ = expr(EVAR, .id = ignore);
-        return expr(ELET, .let = { _, lhs, body });
+        expr    *_ = expr(EVAR, srcloc, .id = ignore);
+        return expr(ELET, lhs->loc, .let = { _, lhs, body });
     }
 
     else if (want(TTYPING)) {
         type *type = ty_with_coining();
-        return expr(ETY, .typing = { lhs, type });
+        return expr(ETY, lhs->loc, .typing = { lhs, type });
     }
 
     else
@@ -931,7 +1061,7 @@ void datbind(void) {
 
     need(TEQUAL);
 
-    if (peek(TCID)) { // Define datatype.
+    if (peek(TCID) || peek(TBAR)) { // Define datatype.
         type *datatype = tycon(type_id, nargs, args);
         typetab = new(typing, type_id, datatype, typetab);
 
@@ -964,7 +1094,8 @@ void datbind(void) {
 }
 
 expr **top(expr **nextp) {
-    while (!peek(TEOF))
+    while (!peek(TEOF)) {
+        loc loc = (peek(0), srcloc);
         if (want(TINFIXL)) infixdec(1);
         else if (want(TINFIXR)) infixdec(0);
         else if (want(TDATATYPE)) datbind();
@@ -972,34 +1103,69 @@ expr **top(expr **nextp) {
             need(TLET);
             if (want(TREC)) {
                 struct dec *decs = rec_decs();
-
-                *nextp = expr(EREC, .rec = { decs, 0 });
+                *nextp = expr(EREC, loc, .rec = { decs, 0 });
                 nextp = &(*nextp)->rec.body;
             }
             else
                 nextp = nonrec_decs(nextp);
         }
+    }
 
     if (*nextp == 0)
-        *nextp = expr(ETUPLE);
+        *nextp = expr(ETUPLE, srcloc);
     return nextp;
 }
 
 _Noreturn void *semantic(expr *c, char *msg, ...) {
     va_list ap; va_start(ap, msg);
-    pr("(boot) error %s:%d: %*.\n", c->loc.fn, c->loc.ln, msg, &ap);
+    pr("error %s:%d:%d: %*.\n", c->loc.fn, c->loc.ln, c->loc.col, msg, &ap);
     exit(1);
 }
 
-type *unify(expr *c, type *a, type *b) {
-    if (!unifies(a, b))
-        semantic(c, "type error:\n %t\n %t", a, b);
+void *warn(expr *c, char *msg, ...) {
+    va_list ap; va_start(ap, msg);
+    pr("warning %s:%d:%d: %*.\n", c->loc.fn, c->loc.ln, c->loc.col, msg, &ap);
+    va_end(ap);
+}
 
-    a = target(a);
-    b = target(b);
-    return a->form == ALIASTY? a:
-           b->form == ALIASTY? b:
-           a;
+type *unify(expr *c, type *want, type *got) {
+    if (!unifies(want, got))
+        semantic(c, "type error:\nwant: %t\ngot : %t", want, got);
+
+    want = target(want);
+    got = target(got);
+    return want->form == ALIASTY? want:
+           got->form == ALIASTY? got:
+           want;
+}
+
+bool is_value(expr *e) {
+    switch (e->form) {
+    case EINT:
+    case ECHAR:
+    case ESTRING:
+    case EVAR:
+    case ECON:
+    case EFN:
+        return true;
+
+    case ECASE:
+    case ELET:
+    case EREC:
+    case EAS:
+        return false;
+
+    case ETUPLE:    for (int i = 0; i < e->n; i++)
+                        if (!is_value(e->tuple[i]))
+                            return false;
+                    return true;
+
+    case EAPP:      return  e->lhs->form == ECON &&
+                            e->lhs->id != refid &&
+                            is_value(e->rhs);
+
+    case ETY:       return is_value(e->typing.value);
+    }
 }
 
 /*
@@ -1016,6 +1182,7 @@ type *unify(expr *c, type *a, type *b) {
 type *check(expr *c, typing *env) {
     type    *type, *lhs, *rhs, **args;
     types   *oldng = nongeneric;
+    con_use *con_use;
 
     switch (c->form) {
     case EINT:      return inttype;
@@ -1037,8 +1204,11 @@ type *check(expr *c, typing *env) {
                         args[i] = check(c->tuple[i], env);
                     return tupletype(c->n, args);
 
-    case EFN:       lhs = check_pattern(c->lhs, &env);
-                    rhs = check(c->rhs, env);
+    case EFN:       lhs = tyvar(0);
+                    nongeneric = new(types, lhs, nongeneric);
+                    if (c->fn.id != ignore)
+                        env = new(typing, c->fn.id, lhs, env);
+                    rhs = check(c->fn.value, env);
                     nongeneric = oldng;
                     return fntype(lhs, rhs);
 
@@ -1048,7 +1218,7 @@ type *check(expr *c, typing *env) {
                     lhs = target(lhs);
 
                     if (isfn(lhs)) { // Cleaner error with only arg.
-                        unify(c, lhs->args[0], rhs);
+                        unify(c->rhs, lhs->args[0], rhs);
                         return lhs->args[1];
                     }
                     else {
@@ -1071,13 +1241,28 @@ type *check(expr *c, typing *env) {
                         nongeneric = oldng;
                     }
 
+                    con_use = cons_for(target(lhs));
+                    for (struct rule *i = c->rules; i; i = i->next)
+                        switch (i->lhs->form) {
+                        case EVAR: use_con(&con_use, ignore); break;
+                        case ECON: use_con(&con_use, i->lhs->id); break;
+                        case EAPP: use_con(&con_use, i->lhs->lhs->id); break;
+                        default: break;
+                        }
+                    for (struct con_use *i = con_use; i; i = i->next)
+                        warn(c, "unhandled case: %s", i->id);
+
                     return rhs;
 
-    case ELET:      rhs = check(c->let.rhs, env);
+    case ELET:      if (c->let.rhs->form == EFN && c->let.lhs->form != EVAR)
+                        semantic(c->let.lhs, "function not bound to a var");
+                    rhs = check(c->let.rhs, env);
                     lhs = check_pattern(c->let.lhs, &env);
-                    nongeneric = oldng;     // All let symbols are polymorphic.
                     unify(c->let.lhs, lhs, rhs);
+                    if (is_value(c->let.rhs)) // Look up "value restriction".
+                        nongeneric = oldng;
                     type = check(c->let.body, env);
+                    nongeneric = oldng;
                     return type;
 
     case EREC:      // Pre-define all functions with non-generic typevars.
@@ -1105,6 +1290,8 @@ type *check(expr *c, typing *env) {
     case ETY:       lhs = check(c->typing.value, env);
                     rhs = fresh(c->typing.type, 0); // (don't affect target)
                     return unify(c, rhs, lhs);
+
+    case EAS:       semantic(c, "@ cannot be used as an expression");
     }
 }
 
@@ -1153,13 +1340,24 @@ type *check_pattern(expr *c, typing **env) {
     case ETY:       type = check_pattern(c->typing.value, env);
                     return unify(c, c->typing.type, type);
 
-    default:        return semantic(c, "invalid pattern");
+    case EAS:       type = tyvar(0);
+                    nongeneric = new(types, type, nongeneric);
+                    if (c->as.id != ignore)
+                        *env = new(typing, c->as.id, type, *env);
+                    return unify(c, type, check_pattern(c->as.value, env));
+
+    case EFN:
+    case ECASE:
+    case ELET:
+    case EREC:
+        return semantic(c, "invalid pattern");
     }
 }
 
 bool bind_pattern(expr *pat, value x, environ **env) {
     switch (pat->form) {
     case EINT:      return pat->integer == x.integer;
+    case ECHAR:     return pat->character == x.character;
     case ESTRING:   return !strcmp(pat->string, x.string);
 
     case EVAR:      if (pat->id != ignore)
@@ -1179,7 +1377,17 @@ bool bind_pattern(expr *pat, value x, environ **env) {
                     return  pat->lhs->id == x.con
                             && bind_pattern(pat->rhs, *x.data, env);
 
-    default:        semantic(pat, "INTERNAL ERROR: PATTERN (%e)", pat);
+    case ETY:       return bind_pattern(pat->typing.value, x, env);
+
+    case EAS:       if (pat->id != ignore)
+                        *env = new(environ, pat->as.id, x, *env);
+                    return bind_pattern(pat->as.value, x, env);
+
+    case EFN:
+    case ECASE:
+    case ELET:
+    case EREC:
+        semantic(pat, "INTERNAL ERROR: PATTERN (%e)", pat);
     }
 }
 
@@ -1210,7 +1418,7 @@ tail:
                         values[i] = eval(code->tuple[i], env);
                     return tuple(code->n, values);
 
-    case EFN:       return function(code->lhs, code->rhs, env);
+    case EFN:       return function(code->fn.id, code->fn.value, env);
 
     case EAPP:      x = eval(code->lhs, env);
                     y = eval(code->rhs, env);
@@ -1222,17 +1430,9 @@ tail:
                         return data(x.con, new(value[1], y));
 
                     if (x.form == FN) {
-                        env = x.env;
-                        if (bind_pattern(x.param, y, &env)) {
-                            code = x.body;
-                            goto tail;
-                        } else
-                            semantic(code,
-                                     "REFUTED ARG:\n%s:%d: %e\n%x",
-                                     x.param->loc.fn,
-                                     x.param->loc.ln,
-                                     x.param,
-                                     y);
+                        env = new(environ, x.param, y, x.env);
+                        code = x.body;
+                        goto tail;
                     }
 
                     semantic(code, "INTERNAL ERROR: CALL (%x)", x);
@@ -1264,7 +1464,7 @@ tail:
                     for (struct dec *i = code->rec.decs; i; i = i->next)
                         env = new(environ,
                                   i->id,
-                                  function(i->fn->lhs, i->fn->rhs, 0),
+                                  function(i->fn->fn.id, i->fn->fn.value, 0),
                                   env);
 
                     for (environ *i = env; i != saved; i = i->next)
@@ -1275,6 +1475,8 @@ tail:
 
     case ETY:       code = code->typing.value;
                     goto tail;
+
+    case EAS:       semantic(code, "INTERNAL ERROR: EAS: %c", code);
     }
 }
 
@@ -1313,14 +1515,20 @@ value prim_write_file(expr *code, value x) {
     return trueval;
 }
 value prim_print(expr *code, value x) {
-    pr("%x", x);
+    if (x.form == STRING)
+        pr("%s", x.string);
+    else
+        pr("%x", x);
     return x;
 }
 value prim_ord(expr *code, value x) {
     return integer(x.character);
 }
 value prim_chr(expr *code, value x) {
-    return character(x.integer);
+    return character(x.integer & 255);
+}
+value prim_chrstr(expr *code, value x) {
+    return string(strings[x.character]);
 }
 value prim_set(expr *code, value x) {
     return (*x.tuple[0].data = x.tuple[1]);
@@ -1398,7 +1606,7 @@ value prim_implode(expr *code, value x) {
 
     return string(text);
 }
-value prim_concat(expr *code, value x) {
+value prim_join(expr *code, value x) {
     int n = 0;
     for (value i = x; consp(i); i = tl(i))
         n += strlen(hd(i).string);
@@ -1428,6 +1636,8 @@ void basis(char *id,
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, 0, _IONBF, 0);
+
     typing      *cenv = 0;
     environ     *renv = 0;
 
@@ -1436,19 +1646,22 @@ int main(int argc, char **argv) {
     nilid       = intern("NIL");
     noneid      = intern("NONE");
     someid      = intern("SOME");
-    trueid      = intern("True");
-    falseid     = intern("False");
+    trueid      = intern("TRUE");
+    falseid     = intern("FALSE");
+    refid       = intern("REF");
     andid       = intern("&&");
     orid        = intern("||");
     ignore      = intern("_");
-    falseval    = data(intern("False"), 0);
-    trueval     = data(intern("True"), 0);
+    falseval    = data(intern("FALSE"), 0);
+    trueval     = data(intern("TRUE"), 0);
     inttype     = tycon(intern("int"), 0, 0);
     chartype    = tycon(intern("char"), 0, 0);
     strtype     = tycon(intern("string"), 0, 0);
     typetab     = new(typing, inttype->id, inttype, typetab);
     typetab     = new(typing, chartype->id, chartype, typetab);
     typetab     = new(typing, strtype->id, strtype, typetab);
+    for (int i = 0; i < 255; i++)
+        strings[i] = intern((char[]){ i, 0 });
 
     // Set up primitive functions.
     type    *any = tyvar(0);
@@ -1472,11 +1685,12 @@ int main(int argc, char **argv) {
     basis(":=", refany, any, prim_set, &cenv, &renv);
     basis("ord", chartype, inttype, prim_ord, &cenv, &renv);
     basis("chr", inttype, chartype, prim_chr, &cenv, &renv);
+    basis("chrstr", chartype, strtype, prim_chrstr, &cenv, &renv);
     basis("sub", strint, chartype, prim_sub, &cenv, &renv);
     basis("substring", strint2, strtype, prim_substring, &cenv, &renv);
     basis("size", strtype, inttype, prim_size, &cenv, &renv);
     basis("implode", charlist, strtype, prim_implode, &cenv, &renv);
-    basis("concat", strlist, strtype, prim_concat, &cenv, &renv);
+    basis("join", strlist, strtype, prim_join, &cenv, &renv);
     basis("+", int2, inttype, prim_add, &cenv, &renv);
     basis("-", int2, inttype, prim_subtract, &cenv, &renv);
     basis("*", int2, inttype, prim_multiply, &cenv, &renv);
