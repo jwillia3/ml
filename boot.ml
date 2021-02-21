@@ -11,25 +11,31 @@ infixl 0 |>
 infixr 0 $
 
 datatype bool = FALSE | TRUE
-datatype * list = NIL | : (*, * list)
-datatype * option = NONE | SOME *
+datatype (*)list = NIL | : (*, * list)
+datatype (*)option = NONE | SOME *
 datatype (*, err) result = OK * | ERROR err
-datatype * ref = REF *
+datatype (*)ref = REF *
+
+let write_file path text = write_file (path, text)
+let sub s i = sub (s, i)
+let substr s i n = substr (s, i, n)
 
 
 #
 # BOOL
 #
 
-let not TRUE = FALSE
---- not FALSE = TRUE
+let not
+--- TRUE = FALSE
+--- FALSE = TRUE
 
-let fold_bool f _ TRUE = f ()
---- fold_bool _ f FALSE = f ()
+let fold_bool
+--- f _ TRUE = f ()
+--- _ f FALSE = f ()
 
-let map_bool f TRUE = f ()
---- map_bool _ FALSE = FALSE
-
+let map_bool
+--- f TRUE = f ()
+--- _ FALSE = FALSE
 
 
 #
@@ -43,7 +49,6 @@ let isdigit c = let n = ord c in n >= ord '0' && n <= ord '9'
 let isalnum c = isalpha c || isdigit c
 let isspace c = c == ' ' || c == '\n' || c == '\t'
 
-
 #
 # FUNCTION
 #
@@ -56,6 +61,7 @@ let curry f x y = f(x, y)
 let of(f, g) x = f (g x)
 let |>(x, f) = f x
 let $(f, x) = f x
+
 
 #
 # GENERAL
@@ -71,7 +77,6 @@ let snd(_, x) = x
 let map_fst f (fst, snd) = (f fst, snd)
 let map_snd f (fst, snd) = (fst, f snd)
 let pair x y = (x, y)
-let rpair x y = (y, x)
 let true = const TRUE
 let false = const FALSE
 
@@ -92,30 +97,35 @@ let succ x = x + 1
 # OPTION
 #
 
-let is_some (SOME _) = TRUE
---- is_some _        = FALSE
+let issome
+--- (SOME _) = TRUE
+--- _        = FALSE
 
-let is_none NONE     = TRUE
---- is_none _        = FALSE
+let isnone
+--- NONE     = TRUE
+--- _        = FALSE
 
-let fold_option f _ (SOME x) = f x
---- fold_option _ f _        = f ()
+let foldopt
+--- f _ (SOME x) = f x
+--- _ f _        = f ()
 
-let bind_option :: (a option -> b option) -> a option -> b option
---- bind_option f (SOME x) = f x
---- bind_option _ NONE     = NONE
+let bindopt :: (a option -> b option) -> a option -> b option
+--- f (SOME x) = f x
+--- _ NONE     = NONE
 
-let map_option :: (a option -> b) -> a option -> b option
---- map_option f (SOME x) = SOME (f x)
---- map_option f NONE     = NONE
+let mapopt :: (a option -> b) -> a option -> b option
+--- f (SOME x) = SOME (f x)
+--- f NONE     = NONE
 
-let default x NONE = x
---- default _ x    = x
+let default
+--- x NONE = x
+--- _ x    = x
 
-let value_of x = let (SOME x') = x in x'
+let val x = let (SOME x) = x in x
 
-let option_of x TRUE = SOME x
---- option_of _ FALSE = NONE
+let opt
+--- x TRUE  = SOME x
+--- _ FALSE = NONE
 
 
 #
@@ -125,8 +135,9 @@ let option_of x TRUE = SOME x
 let get_ok x = let (OK x') = x in x'
 let get_error x = let (ERROR x') = x in x'
 
-let fold_result f _ (OK x) = f x
---- fold_result _ f (ERROR x) = f x
+let fold_result
+--- f _ (OK x) = f x
+--- _ f (ERROR x) = f x
 
 let bind_result :: ((a, b) result -> (c, d) result) -> (a, b) result -> (c, d) result
 --- bind_result f (OK x) = f x :: (*, **) result
@@ -142,37 +153,37 @@ let map_result :: (a -> b) -> (a, c) result -> (b, c) result
 #
 
 let foldl f leftmost list = let rec loop out (x : xs') = loop (f out x) xs'
-                                --- loop out []        = out
+                                ---      out []        = out
                             in loop leftmost list
 
 let foldl_self f (leftmost: list) = foldl f leftmost list
 
-let reverse list = foldl (fn x y -> y : x) [] list
+let reverse list = foldl (\x y -> y : x) [] list
 
 let foldr f rightmost list = foldl (flip f) rightmost (reverse list)
 
 let foldr_self f list = let (rightmost : list') = reverse list in
-                        foldl (fn x y -> f y x) rightmost list'
+                        foldl (\x y -> f y x) rightmost list'
 
 let append([], rhs) = rhs
---- append(lhs, []) = lhs
---- append(lhs, rhs) = foldr (curry (:)) rhs lhs
+---       (lhs, []) = lhs
+---       (lhs, rhs) = foldr (curry (:)) rhs lhs
 
 let ++ = append
 
 let flatten lists = foldr (curry (++)) [] lists
 
 let null [] = TRUE
---- null _  = FALSE
+---      _  = FALSE
 
 let length list = let rec loop n (_ : xs) = loop (n + 1) xs
-                      --- loop n []       = n
+                      ---      n []       = n
                   in loop 0 list
 
 let rec same_length []    []    = TRUE
-    --- same_length []    _     = FALSE
-    --- same_length _     []    = FALSE
-    --- same_length (_:x) (_:y) = same_length x y
+    ---             []    _     = FALSE
+    ---             _     []    = FALSE
+    ---             (_:x) (_:y) = same_length x y
 
 let tabulate n f =  let rec loop out i =
                       if i < n then loop (f i : out) (i + 1) else out
@@ -183,53 +194,53 @@ let tl x = let (_:x') = x in x'
 let cons hd tl = hd : tl
 let singleton x = [x]
 let rec last [x] = x
-    --- last (_:x) = last x
-    --- last [] = raise "#LAST"
+    ---      (_:x) = last x
+    ---      [] = raise "#LAST"
 
 let rec nth (x:_) 0 = x
-    --- nth (_:x) n = nth x (n - 1)
+    ---     (_:x) n = nth x (n - 1)
 
 let map f list =  let rec loop out (x:xs) = loop (f x : out) xs
-                      --- loop out []     = out
+                      ---      out []     = out
                   in reverse (loop [] list)
 let flatmap f list = flatten (map f list)
 
 let rec app f (x:xs) = f x; app f xs
-    --- app _ []     = ()
+    ---     _ []     = ()
 
 let rec find p (x:xs) = if p x then SOME x else find p xs
-    --- find _ []     = NONE
+    ---      _ []     = NONE
 
 let rec any p (x:xs) = p x || any p xs
-    --- any _ []     = FALSE
+    ---     _ []     = FALSE
 
 let rec all p (x:xs) = p x && all p xs
-    --- all _ []     = TRUE
+    ---     _ []     = TRUE
 
 let none p list = not (any p list)
 
-let assoc key list = map_option snd (find (equal key of fst) list)
+let assoc key list = mapopt snd (find (equal key of fst) list)
 
-let filter p list = foldr (fn x xs -> if p x then x : xs else xs) [] list
+let filter p list = foldr (\x xs -> if p x then x : xs else xs) [] list
 
 # STRING
 let ^(lhs, rhs) = join [lhs, rhs]
 
 let explode string =  let rec loop out i =
-                        let c = sub(string, i) in
+                        let c = sub string i in
                         if c == '\0' then out else loop (c : out) (i + 1)
                       in loop [] 0
 
 let intersperse _   []     = ""
---- intersperse sep (x:xs) = x ^ join(map (fn i -> sep ^ i) xs)
+---             sep (x:xs) = x ^ join(map (\i -> sep ^ i) xs)
 
 let split delim string =
   let rec loop i j out =
-    let c = sub(string, j) in
-    if c == '\0'  then let field = substring(string, i, j - i) in
+    let c = sub string j in
+    if c == '\0'  then let field = substr string i (j - i) in
                        (field : out)
                   else
-    if c == delim then let field = substring(string, i, j - i) in
+    if c == delim then let field = substr string i (j - i) in
                        loop (j + 1) (j + 1) (field : out)
                   else
     loop i (j + 1) out
@@ -238,14 +249,14 @@ let split delim string =
 
 let char_in_set set char =
   let rec loop i =
-    let c = sub(set, i) in
+    let c = sub set i in
     if c == '\0' then FALSE else c == char || loop (i + 1)
   in
   loop 0
 
 let find_char char i string =
   let rec loop i =
-    let c = sub(string, i) in
+    let c = sub string i in
     if c == '\0'       then NONE
     else if c == char  then SOME i
     else loop (i + 1)
@@ -255,9 +266,9 @@ let find_char char i string =
 let unescape string =
   let rec loop i out =
     case find_char '\\' i string
-    | NONE   -> substring(string, i, size string - i) : out
-    | SOME j -> let out' = substring(string, i, j - i) : out
-                and (c, i') = case sub(string, j + 1)
+    | NONE   -> substr string i (size string - i) : out
+    | SOME j -> let out' = substr string i (j - i) : out
+                and (c, i') = case sub string (j + 1)
                               | '\0' -> ("", j + 1)
                               | 'n'  -> ("\n", j + 2)
                               | 't'  -> ("\t", j + 2)
@@ -269,7 +280,7 @@ let unescape string =
 
 let escape quote string =
   let rec loop out i =
-    case sub(string, i)
+    case sub string i
     | '\0' -> out
     | '\\' -> loop ('\\':'\\':out) (i + 1)
     | '\n' -> loop ('n':'\\':out) (i + 1)
@@ -304,14 +315,14 @@ let rec itoa n =
 # ASCII-to-int
 let atoi text =
   let rec loop i out =
-    let c = sub(text, i) in
+    let c = sub text i in
     if isdigit c then
       loop (i + 1) (out * 10 + (ord c - ord '0'))
     else
       out
   in
-  if sub(text, 0) == '-' then negate (loop 1 0) else
-  if sub(text, 0) == '+' then loop 1 0 else
+  if sub text 0 == '-' then negate (loop 1 0) else
+  if sub text 0 == '+' then loop 1 0 else
   loop 0 0
 
 

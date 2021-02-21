@@ -6,13 +6,13 @@ Grammar
 -------
 ```
 top:        ("datatype" datbind | infixdec | "let" ["rec"] <"and", dec> )
-datbind:    (id | "(" id_seq ")") id "=" ty | conbind
+datbind:    ["(" id_seq ")"] id "=" conbind
 conbind:    ["|"] cid [ty] {"|" cid [ty]}
 infixdec:   "infixl"/"infixr" int {id/cid}
 ty:         appty {'->' ty}
 appty:      atty {id}
 atty:       id / "(" ty_seq ")"
-dec:        [id '::' ty] <"---", id {atexp} "=" exp>
+dec:        id ['::' ty] <"---", {atexp} "=" exp>
             atexp "=" exp
 exp:        lexp ";" exp
             lexp "::" ty
@@ -28,9 +28,10 @@ atexp:      int / character / string
             cid
             "(" exp_seq ")"
             "[" exp_seq "]"
-            "fn" ['::' ty] <"|", {atexp} "->" exp>
+            "\" ['::' ty] <"|", {atexp} "->" exp>
 
-id:     [a-zA-Z0-9_']+ | [!%&$*+-/:<=>?@\~`^|]+
+id:     [a-zA-Z0-9_']+ | [!%&$*+-/:<=>?@~`^|]+
+cid:    [A-Z][a-zA-Z0-9_']+
 ```
 
 Notes

@@ -30,7 +30,7 @@ typedef struct environ {
 } environ;
 
 typedef struct type {
-    enum { TYVAR, TY, FNTY, TUPLETY, ALIASTY } form;
+    enum { TYVAR, TY, FNTY, TUPLETY } form;
     int         n;
     struct type **args;
     struct type *inst;
@@ -94,15 +94,15 @@ typedef enum {
     // Keep in order with `tokens[]`.
     // Keep relative order: CID, single-char punct, ID, reserved
     TEOF, TINT, TCHAR, TSTRING, TCID, TLP, TRP, TLB, TRB,
-    TCOMMA, TSEMI, TID, TEQUAL, TLET, TREC, TAND, TIN, TFN,
+    TCOMMA, TSEMI, TFN, TID, TEQUAL, TLET, TREC, TAND, TIN,
     TARROW, TCASE, TBAR, TIF, TTHEN, TELSE, TINFIXL, TINFIXR,
     TDATATYPE, TTYPING, TCONT, TAS,
 } Token;
 
-char *opchr = "!%&$*+-/:<=>?@\\~`^|";
+char *opchr = "!%&$*+-/:<=>?@~`^|";
 char *tokens[] = {"eof", "int", "character", "string", "con id",
-    "(", ")", "[", "]", ",", ";", "id", "=", "let", "rec",
-    "and", "in", "fn", "->", "case", "|", "if", "then", "else",
+    "(", ")", "[", "]", ",", ";", "\\", "id", "=", "let", "rec",
+    "and", "in", "->", "case", "|", "if", "then", "else",
     "infixl", "infixr", "datatype", "::", "---", "@", 0 };
 
 char        source[128 * 1024];
@@ -131,6 +131,7 @@ int         formal_uid;
 void *pr(char *msg, ...);
 type *ty(void);
 type *ty_with_coining(void);
+struct dec *rec_decs(void);
 expr *expression(void);
 expr *atexp(bool required);
 type *check(expr *c, typing *env);
@@ -323,11 +324,6 @@ bool unifies(type *a, type *b) {
     if (isvar(b))
         return unifies(b, a);
 
-    if (a->form == ALIASTY)
-        a = a->inst;
-    if (b->form == ALIASTY)
-        b = b->inst;
-
     if (a->form != b->form || a->id != b->id || a->n != b->n)
         return false;
 
@@ -341,7 +337,6 @@ void *print_type(type *t) {
     switch (t->form) {
     case TYVAR:     return pr("%s", t->id);
 
-    case ALIASTY:
     case TY:        if (t->n == 0)
                         return pr("%s", t->id);
 
@@ -665,7 +660,7 @@ expr *listexp(void) {
     }
 }
 
-expr *fnexp(Token delim, Token cont, char *cont_name, loc loc) {
+expr *fnexp(Token delim, Token cont, loc loc) {
     if (want(delim))
         return expression();
 
@@ -676,10 +671,9 @@ expr *fnexp(Token delim, Token cont, char *cont_name, loc loc) {
     int     nformals = 0;
     int     uid = formal_uid;
 
-    if (typing && peek(cont))
-        goto check_cont;
+    want(cont);
 
-    while (true) {
+    do {
         struct loc loc = (peek(0), srcloc);
         int     n = 0;
         expr    **pars = 0;
@@ -703,13 +697,7 @@ expr *fnexp(Token delim, Token cont, char *cont_name, loc loc) {
             syntax("arity does not match: %d/%d", n, nformals);
         *rulep = new(struct rule, lhs, rhs, *rulep);
         rulep = &(*rulep)->next;
-
-check_cont:
-        if (!want(cont))
-            break;
-        if (cont_name && (need(TID), strcmp(tokstr, cont_name)))
-            syntax("need name after ---: %s", cont_name);
-    }
+    } while (want(cont));
 
     formal_uid -= nformals;
 
@@ -742,7 +730,7 @@ expr *atexp(bool required) {
     if (want(TSTRING))  return expr(ESTRING, loc, .string = tokstr);
     if (want(TCID))     return expr(ECON, loc, .id = tokstr);
     if (want(TLB))      return listexp();
-    if (want(TFN))      return fnexp(TARROW, TBAR, 0, loc);
+    if (want(TFN))      return fnexp(TARROW, TBAR, loc);
 
     if (want(TID)) {
         char *id = tokstr;
@@ -811,7 +799,7 @@ struct dec *rec_decs(void) {
     do {
         loc     loc = (peek(0), srcloc);
         char    *id = (need(TID), tokstr);
-        expr    *body = fnexp(TEQUAL, TCONT, id, loc);
+        expr    *body = fnexp(TEQUAL, TCONT, loc);
 
         *indir = new(struct dec, id, body, 0);
         indir = &(*indir)->next;
@@ -827,7 +815,7 @@ expr **nonrec_decs(expr **indir) {
         loc     loc = (peek(0), srcloc);
         expr    *lhs = atexp(true);
         char    *id = lhs->form==EVAR? lhs->id: "(bad)";
-        expr    *rhs = fnexp(TEQUAL, TCONT, id, loc);
+        expr    *rhs = fnexp(TEQUAL, TCONT, loc);
 
         *indir = expr(ELET, loc, .let = { lhs, rhs, 0 });
         indir = &(*indir)->let.body;
@@ -960,7 +948,7 @@ type *appty(void) {
         if (!type)
             syntax("undefined type: %s", id);
 
-        if (type->form != TY && type->form != ALIASTY)
+        if (type->form != TY)
             syntax("not a type constructor: %t", type);
 
         if (type->n == 0)
@@ -975,23 +963,7 @@ type *appty(void) {
                type->n == 1? &arg: arg->args,
                type->n * sizeof *args);
 
-        if (type->form == ALIASTY) {
-            // Instantiate the alias.
-            // Copy the target and associate alias typevars with given args.
-            // The only typevars in the target type must have come from the
-            // alias. So binding the target args is reflected in the target.
-            // See `unifies()` for more information.
-
-            type = fresh(type, 0);
-
-            for (int i = 0; i < type->n; i++)
-                unifies(type->args[i], args[i]);
-
-            arg = new(struct type, ALIASTY, type->n, args,
-                      .id = type->id,
-                      .inst = type->inst);
-        }
-        else if (type->form == TY)
+        if (type->form == TY)
             arg = tycon(type->id, type->n, args);
     }
     return arg;
@@ -1045,52 +1017,25 @@ void datbind(void) {
             args[nargs++] = (need(TID), tyvar(tokstr));
         } while (want(TCOMMA));
         need(TRP);
-        type_id = (need(TID), tokstr);
     }
-    else if (want(TID)) { // Single or no type arguments.
-        type_id = tokstr;
-        if (want(TID)) {
-            args = new(struct type*[1], tyvar(type_id));
-            nargs = 1;
-            type_id = tokstr;
-        }
-    }
+
+    type_id = (need(TID), tokstr);
 
     if (find(type_id, typetab))
         syntax("type already defined: %s", type_id);
 
     need(TEQUAL);
 
-    if (peek(TCID) || peek(TBAR)) { // Define datatype.
-        type *datatype = tycon(type_id, nargs, args);
-        typetab = new(typing, type_id, datatype, typetab);
+    type *datatype = tycon(type_id, nargs, args);
+    typetab = new(typing, type_id, datatype, typetab);
 
-        for (int i = 0; i < nargs; i++)
-            typetab = new(typing, args[i]->id, args[i], typetab);
+    for (int i = 0; i < nargs; i++)
+        typetab = new(typing, args[i]->id, args[i], typetab);
 
-        conbind(datatype);
+    conbind(datatype);
 
-        for (int i = 0; i < nargs; i++)
-            typetab = typetab->next;
-    }
-
-    else {
-        // Define type alias.
-        // See `appty()` and `unifies()` for more info on aliases.
-
-        for (int i = 0; i < nargs; i++)
-            typetab = new(typing, args[i]->id, args[i], typetab);
-
-        type *inst = ty();
-        type *alias = new(type, ALIASTY, nargs, args,
-                          .id = type_id,
-                          .inst = inst);
-
-        for (int i = 0; i < nargs; i++)
-            typetab = typetab->next;
-
-        typetab = new(typing, type_id, alias, typetab);
-    }
+    for (int i = 0; i < nargs; i++)
+        typetab = typetab->next;
 }
 
 expr **top(expr **nextp) {
@@ -1131,12 +1076,7 @@ void *warn(expr *c, char *msg, ...) {
 type *unify(expr *c, type *want, type *got) {
     if (!unifies(want, got))
         semantic(c, "type error:\nwant: %t\ngot : %t", want, got);
-
-    want = target(want);
-    got = target(got);
-    return want->form == ALIASTY? want:
-           got->form == ALIASTY? got:
-           want;
+    return target(want);
 }
 
 bool is_value(expr *e) {
@@ -1579,7 +1519,7 @@ value prim_sub(expr *code, value x) {
         semantic(code, "INDEX %d", i);
     return character(x.tuple[0].string[i]);
 }
-value prim_substring(expr *code, value x) {
+value prim_substr(expr *code, value x) {
     int i = x.tuple[1].integer;
     int count = x.tuple[2].integer;
     if (i < 0)
@@ -1687,7 +1627,7 @@ int main(int argc, char **argv) {
     basis("chr", inttype, chartype, prim_chr, &cenv, &renv);
     basis("chrstr", chartype, strtype, prim_chrstr, &cenv, &renv);
     basis("sub", strint, chartype, prim_sub, &cenv, &renv);
-    basis("substring", strint2, strtype, prim_substring, &cenv, &renv);
+    basis("substr", strint2, strtype, prim_substr, &cenv, &renv);
     basis("size", strtype, inttype, prim_size, &cenv, &renv);
     basis("implode", charlist, strtype, prim_implode, &cenv, &renv);
     basis("join", strlist, strtype, prim_join, &cenv, &renv);
