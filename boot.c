@@ -57,7 +57,7 @@ typedef struct typing {
 typedef struct expr expr;
 struct expr {
     enum { EINT, ECHAR, ESTRING, EVAR, ECON, ETUPLE, EFN,
-        EAPP, ECASE, ELET, EREC, ETY, EAS,
+        EAPP, ECASE, ELET, EREC, ETY,
     } form;
     union {
         int     integer;
@@ -70,7 +70,7 @@ struct expr {
         struct { struct dec *decs; expr *body; } rec;
         struct { expr *subject; struct rule *rules; };
         struct { expr *value; type *type; } typing;
-        struct { char *id; expr *value; } as, fn;
+        struct { char *id; expr *value; } fn;
     };
     loc loc;
 };
@@ -94,16 +94,16 @@ typedef enum {
     // Keep in order with `tokens[]`.
     // Keep relative order: CID, single-char punct, ID, reserved
     TEOF, TINT, TCHAR, TSTRING, TCID, TLP, TRP, TLB, TRB,
-    TCOMMA, TSEMI, TFN, TID, TEQUAL, TLET, TREC, TAND, TIN,
+    TCOMMA, TSEMI, TID, TEQUAL, TLET, TREC, TAND, TIN,
     TARROW, TCASE, TBAR, TIF, TTHEN, TELSE, TINFIXL, TINFIXR,
-    TDATATYPE, TTYPING, TCONT, TAS,
+    TDATATYPE, TTYPING, TFN,
 } Token;
 
 char *opchr = "!%&$*+-/:<=>?@~`^|";
 char *tokens[] = {"eof", "int", "character", "string", "con id",
-    "(", ")", "[", "]", ",", ";", "\\", "id", "=", "let", "rec",
+    "(", ")", "[", "]", ",", ";", "id", "=", "let", "rec",
     "and", "in", "->", "case", "|", "if", "then", "else",
-    "infixl", "infixr", "datatype", "::", "---", "@", 0 };
+    "infixl", "infixr", "datatype", "::", "fn", 0 };
 
 char        source[128 * 1024];
 char        *src;
@@ -291,7 +291,7 @@ type *fresh(type *type, typemap **map) {
 
     else {
 
-        // Clone all the arguments of a concrete or alias type.
+        // Clone all the arguments of a concrete.
 
         struct type *inst = type->inst? fresh(type->inst, map): 0;
         struct type **args = malloc(type->n * sizeof *args);
@@ -308,8 +308,6 @@ type *fresh(type *type, typemap **map) {
 // Return true if the two types are compatible.
 // Typevars involved are updated destructively.
 // Because of that, if they do not match, the checker should exit.
-// If an alias is given, its instantiation is used instead.
-// See `appty()` for more info about how instantiation works.
 
 bool unifies(type *a, type *b) {
     a = target(a);
@@ -393,7 +391,6 @@ void *print_expression(expr *e) {
                     return pr(" in %e)", e->rec.body);
 
     case ETY:       return pr("((%e) :: %t)", e->typing.value, e->typing.type);
-    case EAS:       return pr("(%s @ %e)", e->as.id, e->as.value);
     }
 }
 
@@ -660,18 +657,16 @@ expr *listexp(void) {
     }
 }
 
-expr *fnexp(Token delim, Token cont, loc loc) {
+expr *fnexp(Token delim, loc loc) {
     if (want(delim))
         return expression();
-
-    type    *typing = want(TTYPING)? ty_with_coining(): 0;
 
     struct rule *rules = 0;
     struct rule **rulep = &rules;
     int     nformals = 0;
     int     uid = formal_uid;
 
-    want(cont);
+    want(TBAR);
 
     do {
         struct loc loc = (peek(0), srcloc);
@@ -697,7 +692,7 @@ expr *fnexp(Token delim, Token cont, loc loc) {
             syntax("arity does not match: %d/%d", n, nformals);
         *rulep = new(struct rule, lhs, rhs, *rulep);
         rulep = &(*rulep)->next;
-    } while (want(cont));
+    } while (want(TBAR));
 
     formal_uid -= nformals;
 
@@ -728,16 +723,11 @@ expr *atexp(bool required) {
     if (want(TINT))     return expr(EINT, loc, .integer = tokint);
     if (want(TCHAR))    return expr(ECHAR, loc, .character = tokint);
     if (want(TSTRING))  return expr(ESTRING, loc, .string = tokstr);
+    if (want(TID))      return expr(EVAR, loc, .id = tokstr);
     if (want(TCID))     return expr(ECON, loc, .id = tokstr);
     if (want(TLB))      return listexp();
-    if (want(TFN))      return fnexp(TARROW, TBAR, loc);
+    if (want(TFN))      return fnexp(TARROW, loc);
 
-    if (want(TID)) {
-        char *id = tokstr;
-        if (want(TAS))
-            return expr(EAS, loc, .as = {id, atexp(true)});
-        return expr(EVAR, loc, .id = id);
-    }
     if (want(TLP)) { // Tuple.
         int     n = 0;
         expr    **tuple = 0;
@@ -799,7 +789,7 @@ struct dec *rec_decs(void) {
     do {
         loc     loc = (peek(0), srcloc);
         char    *id = (need(TID), tokstr);
-        expr    *body = fnexp(TEQUAL, TCONT, loc);
+        expr    *body = fnexp(TEQUAL, loc);
 
         *indir = new(struct dec, id, body, 0);
         indir = &(*indir)->next;
@@ -815,7 +805,7 @@ expr **nonrec_decs(expr **indir) {
         loc     loc = (peek(0), srcloc);
         expr    *lhs = atexp(true);
         char    *id = lhs->form==EVAR? lhs->id: "(bad)";
-        expr    *rhs = fnexp(TEQUAL, TCONT, loc);
+        expr    *rhs = fnexp(TEQUAL, loc);
 
         *indir = expr(ELET, loc, .let = { lhs, rhs, 0 });
         indir = &(*indir)->let.body;
@@ -888,7 +878,7 @@ expr *expression(void) {
         return lhs;
 }
 
-void infixdec(int adjust) {
+void idecl(int adjust) {
     int lhs = (need(TINT), tokint);
     int rhs = lhs + adjust;
     while (want(TID) || want(TCID))
@@ -902,7 +892,7 @@ type *find(char *id, typing *env) {
     return 0;
 }
 
-type *atty(void) {
+type *atype(void) {
     if (want(TLP)) { // Tuple.
         int     n = 0;
         type    **tuple = 0;
@@ -917,7 +907,7 @@ type *atty(void) {
         return n == 1? *tuple: tupletype(n, tuple);
     }
 
-    // Named type (typevar, regular, or alias).
+    // Named type (typevar or regular).
     else {
         char *id = (need(TID), tokstr);
         type *type = find(id, typetab);
@@ -938,8 +928,8 @@ type *atty(void) {
     }
 }
 
-type *appty(void) {
-    type *arg = atty();
+type *apptype(void) {
+    type *arg = atype();
 
     while (want(TID)) {
         char    *id = tokstr;
@@ -970,7 +960,7 @@ type *appty(void) {
 }
 
 type *ty(void) {
-    type *lhs = appty();
+    type *lhs = apptype();
     return want(TARROW)? fntype(lhs, ty()): lhs;
 }
 
@@ -988,7 +978,7 @@ type *ty_with_coining(void) {
     return type;
 }
 
-void conbind(type *datatype) {
+void cdecl(type *datatype) {
     want(TBAR);
 
     do {
@@ -1005,7 +995,7 @@ void conbind(type *datatype) {
     } while (want(TBAR));
 }
 
-void datbind(void) {
+void tdecls(void) {
     char    *type_id = 0;
     type    **args = 0;
     int     nargs = 0;
@@ -1032,7 +1022,7 @@ void datbind(void) {
     for (int i = 0; i < nargs; i++)
         typetab = new(typing, args[i]->id, args[i], typetab);
 
-    conbind(datatype);
+    cdecl(datatype);
 
     for (int i = 0; i < nargs; i++)
         typetab = typetab->next;
@@ -1041,9 +1031,9 @@ void datbind(void) {
 expr **top(expr **nextp) {
     while (!peek(TEOF)) {
         loc loc = (peek(0), srcloc);
-        if (want(TINFIXL)) infixdec(1);
-        else if (want(TINFIXR)) infixdec(0);
-        else if (want(TDATATYPE)) datbind();
+        if (want(TINFIXL)) idecl(1);
+        else if (want(TINFIXR)) idecl(0);
+        else if (want(TDATATYPE)) tdecls();
         else {
             need(TLET);
             if (want(TREC)) {
@@ -1092,7 +1082,6 @@ bool is_value(expr *e) {
     case ECASE:
     case ELET:
     case EREC:
-    case EAS:
         return false;
 
     case ETUPLE:    for (int i = 0; i < e->n; i++)
@@ -1230,8 +1219,6 @@ type *check(expr *c, typing *env) {
     case ETY:       lhs = check(c->typing.value, env);
                     rhs = fresh(c->typing.type, 0); // (don't affect target)
                     return unify(c, rhs, lhs);
-
-    case EAS:       semantic(c, "@ cannot be used as an expression");
     }
 }
 
@@ -1280,12 +1267,6 @@ type *check_pattern(expr *c, typing **env) {
     case ETY:       type = check_pattern(c->typing.value, env);
                     return unify(c, c->typing.type, type);
 
-    case EAS:       type = tyvar(0);
-                    nongeneric = new(types, type, nongeneric);
-                    if (c->as.id != ignore)
-                        *env = new(typing, c->as.id, type, *env);
-                    return unify(c, type, check_pattern(c->as.value, env));
-
     case EFN:
     case ECASE:
     case ELET:
@@ -1318,10 +1299,6 @@ bool bind_pattern(expr *pat, value x, environ **env) {
                             && bind_pattern(pat->rhs, *x.data, env);
 
     case ETY:       return bind_pattern(pat->typing.value, x, env);
-
-    case EAS:       if (pat->id != ignore)
-                        *env = new(environ, pat->as.id, x, *env);
-                    return bind_pattern(pat->as.value, x, env);
 
     case EFN:
     case ECASE:
@@ -1415,8 +1392,6 @@ tail:
 
     case ETY:       code = code->typing.value;
                     goto tail;
-
-    case EAS:       semantic(code, "INTERNAL ERROR: EAS: %c", code);
     }
 }
 

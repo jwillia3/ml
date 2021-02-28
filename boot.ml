@@ -1,4 +1,5 @@
 infixr 10 of
+infixr 9 **
 infixl 8 * / rem
 infixl 7 + -
 infixr 7 ^
@@ -11,36 +12,28 @@ infixl 0 |>
 infixr 0 $
 
 datatype bool = FALSE | TRUE
-datatype (*)list = NIL | : (*, * list)
-datatype (*)option = NONE | SOME *
-datatype (*, err) result = OK * | ERROR err
-datatype (*)ref = REF *
+datatype (a)list = NIL | : (a, a list)
+datatype (a)option = NONE | SOME a
+datatype (a)ref = REF a
 
 let write_file path text = write_file (path, text)
 let sub s i = sub (s, i)
 let substr s i n = substr (s, i, n)
 
 
-#
-# BOOL
-#
+# Booleans
 
-let not
---- TRUE = FALSE
---- FALSE = TRUE
+let not TRUE  = FALSE
+      | FALSE = TRUE
 
-let fold_bool
---- f _ TRUE = f ()
---- _ f FALSE = f ()
+let foldbool f  _  TRUE  = f ()
+           | _  f  FALSE = f ()
 
-let map_bool
---- f TRUE = f ()
---- _ FALSE = FALSE
+let mapbool f  TRUE  = f ()
+          | _  FALSE = FALSE
 
 
-#
-# CHAR
-#
+# Characters
 
 let islower c = let n = ord c in n >= ord 'a' && n <= ord 'z'
 let isupper c = let n = ord c in n >= ord 'A' && n <= ord 'Z'
@@ -49,9 +42,8 @@ let isdigit c = let n = ord c in n >= ord '0' && n <= ord '9'
 let isalnum c = isalpha c || isdigit c
 let isspace c = c == ' ' || c == '\n' || c == '\t'
 
-#
-# FUNCTION
-#
+
+# Functions
 
 let identity x = x
 let const x _ = x
@@ -63,27 +55,23 @@ let |>(x, f) = f x
 let $(f, x) = f x
 
 
-#
-# GENERAL
-#
+# General
 
 let pr x = print x; print "\n"; x
+let fatal msg = pr msg; exit -1
 let ! (REF value) = value
-let ref value = REF value
 let equal x y = x == y
 let not_equal x y = x <> y
-let fst(x, _) = x
-let snd(_, x) = x
-let map_fst f (fst, snd) = (f fst, snd)
-let map_snd f (fst, snd) = (fst, f snd)
+let fst (x, _) = x
+let snd (_, x) = x
+let mapfst f (fst, snd) = (f fst, snd)
+let mapsnd f (fst, snd) = (fst, f snd)
 let pair x y = (x, y)
 let true = const TRUE
 let false = const FALSE
 
 
-#
-# INTEGER
-#
+# Integer
 
 let negate x = 0 - x
 let abs x = if x < 0 then negate x else x
@@ -93,59 +81,36 @@ let pred x = x - 1
 let succ x = x + 1
 
 
-#
-# OPTION
-#
+# Option
+# foldopt - handle both cases
+# bindopt - handle SOME value (function returns option)
+# mapopt - handle SOME value (function returns normal value)
 
-let issome
---- (SOME _) = TRUE
---- _        = FALSE
+let issome (SOME _) = TRUE
+         | _        = FALSE
 
-let isnone
---- NONE     = TRUE
---- _        = FALSE
+let isnone NONE     = TRUE
+         | _        = FALSE
 
-let foldopt
---- f _ (SOME x) = f x
---- _ f _        = f ()
+let foldopt  f  _  (SOME x) = f x
+          |  _  f  _        = f ()
 
-let bindopt :: (a option -> b option) -> a option -> b option
---- f (SOME x) = f x
---- _ NONE     = NONE
+let bindopt  f  (SOME x) = f x
+          |  _  NONE     = NONE
 
-let mapopt :: (a option -> b) -> a option -> b option
---- f (SOME x) = SOME (f x)
---- f NONE     = NONE
+let mapopt  f  (SOME x) = SOME (f x)
+         |  f  NONE     = NONE
 
-let default
---- x NONE = x
---- _ x    = x
+let default  x  NONE = x
+          |  _  x    = x
 
-let val x = let (SOME x) = x in x
+let valof x = let (SOME x) = x in x
 
-let opt
---- x TRUE  = SOME x
---- _ FALSE = NONE
+let opt  x  TRUE  = SOME x
+      |  _  FALSE = NONE
 
-
-#
-# RESULT
-#
-
-let get_ok x = let (OK x') = x in x'
-let get_error x = let (ERROR x') = x in x'
-
-let fold_result
---- f _ (OK x) = f x
---- _ f (ERROR x) = f x
-
-let bind_result :: ((a, b) result -> (c, d) result) -> (a, b) result -> (c, d) result
---- bind_result f (OK x) = f x :: (*, **) result
---- bind_result _ x      = x
-
-let map_result :: (a -> b) -> (a, c) result -> (b, c) result
---- map_result f (OK x) = f x
---- map_result _ x      = x
+let optof  f  TRUE  = SOME (f ())
+        |  _  FALSE = NONE
 
 
 #
@@ -153,75 +118,97 @@ let map_result :: (a -> b) -> (a, c) result -> (b, c) result
 #
 
 let foldl f leftmost list = let rec loop out (x : xs') = loop (f out x) xs'
-                                ---      out []        = out
+                                       | out []        = out
                             in loop leftmost list
 
 let foldl_self f (leftmost: list) = foldl f leftmost list
 
-let reverse list = foldl (\x y -> y : x) [] list
+let reverse list = foldl (fn x y -> y : x) [] list
 
 let foldr f rightmost list = foldl (flip f) rightmost (reverse list)
 
 let foldr_self f list = let (rightmost : list') = reverse list in
-                        foldl (\x y -> f y x) rightmost list'
+                        foldl (fn x y -> f y x) rightmost list'
 
-let append([], rhs) = rhs
----       (lhs, []) = lhs
----       (lhs, rhs) = foldr (curry (:)) rhs lhs
+let append ([],  rhs) = rhs
+         | (lhs, []) = lhs
+         | (lhs, rhs) = foldr (curry (:)) rhs lhs
 
 let ++ = append
 
 let flatten lists = foldr (curry (++)) [] lists
 
 let null [] = TRUE
----      _  = FALSE
+       | _  = FALSE
 
-let length list = let rec loop n (_ : xs) = loop (n + 1) xs
-                      ---      n []       = n
+let length list = let rec loop  n  (_ : xs) = loop (n + 1) xs
+                             |  n  []       = n
                   in loop 0 list
 
-let rec same_length []    []    = TRUE
-    ---             []    _     = FALSE
-    ---             _     []    = FALSE
-    ---             (_:x) (_:y) = same_length x y
+let rec samelength  []     []    = TRUE
+                 |  []     _     = FALSE
+                 |  _      []    = FALSE
+                 |  (_:x)  (_:y) = samelength x y
 
 let tabulate n f =  let rec loop out i =
                       if i < n then loop (f i : out) (i + 1) else out
                     in reverse (loop [] 0)
+
+let unfold f seed = let rec loop i out =
+                      foldopt (fn (x, i') -> loop i' (x:out)) (fn _ -> reverse out) (f i)
+                    in loop seed []
 
 let hd x = let (x':_) = x in x'
 let tl x = let (_:x') = x in x'
 let cons hd tl = hd : tl
 let singleton x = [x]
 let rec last [x] = x
-    ---      (_:x) = last x
-    ---      [] = raise "#LAST"
+           | (_:x) = last x
+           | [] = raise "#LAST"
 
 let rec nth (x:_) 0 = x
-    ---     (_:x) n = nth x (n - 1)
+          | (_:x) n = nth x (n - 1)
 
 let map f list =  let rec loop out (x:xs) = loop (f x : out) xs
-                      ---      out []     = out
+                             | out []     = out
                   in reverse (loop [] list)
 let flatmap f list = flatten (map f list)
+let mapi f list = let rec loop out i (x:xs) = loop (f i x : out) (i + 1) xs
+                             | out _ []     = out
+                  in reverse (loop [] 0 list)
 
-let rec app f (x:xs) = f x; app f xs
-    ---     _ []     = ()
+let rec app  f  (x:xs) = f x; app f xs
+          |  _  []     = ()
 
-let rec find p (x:xs) = if p x then SOME x else find p xs
-    ---      _ []     = NONE
+let rec find  p  (x:xs) = if p x then SOME x else find p xs
+           |  _  []     = NONE
 
-let rec any p (x:xs) = p x || any p xs
-    ---     _ []     = FALSE
+let rec findp  p  (x:xs) = foldopt SOME (fn _ -> findp p xs) (p x)
+           |   _  []      = NONE
 
-let rec all p (x:xs) = p x && all p xs
-    ---     _ []     = TRUE
+let rec any  p  (x:xs) = p x || any p xs
+          |  _  []     = FALSE
+
+let rec all  p  (x:xs) = p x && all p xs
+          |  _  []     = TRUE
 
 let none p list = not (any p list)
 
 let assoc key list = mapopt snd (find (equal key of fst) list)
 
-let filter p list = foldr (\x xs -> if p x then x : xs else xs) [] list
+let filter p list = foldr (fn x xs -> if p x then x : xs else xs) [] list
+
+let zip xs ys =
+  let rec loop out (x:xs) (y:ys) = loop ((x, y):out) xs ys
+             | out []     []     = reverse out
+  in loop [] xs ys
+
+let unzip zipped =
+  let rec loop xs ys ((x, y):l) = loop (x:xs) (y:ys) l
+             | xs ys []         = (reverse xs, reverse ys)
+  in loop [] [] zipped
+
+
 
 # STRING
 let ^(lhs, rhs) = join [lhs, rhs]
@@ -231,8 +218,8 @@ let explode string =  let rec loop out i =
                         if c == '\0' then out else loop (c : out) (i + 1)
                       in loop [] 0
 
-let intersperse _   []     = ""
----             sep (x:xs) = x ^ join(map (\i -> sep ^ i) xs)
+let intersperse  _    []     = ""
+              |  sep  (x:xs) = x ^ join(map (fn i -> sep ^ i) xs)
 
 let split delim string =
   let rec loop i j out =
@@ -289,7 +276,7 @@ let escape quote string =
   in
   implode (reverse (loop [] 0))
 
-let escape_char = escape '\''
+let escape_char c = escape '\'' (chrstr c)
 let escape_string = escape '"'
 
 
